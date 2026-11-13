@@ -234,7 +234,7 @@ private:
     void InitRenderParams() override;
 
     ScreenId screenId_ = INVALID_SCREEN_ID;
-    Rect contentRect_;
+    Rect contentRect_ = {0, 0, 0, 0};
     std::vector<Occlusion::Rect> topSurfaceOpaqueRects_;
 
     // bounds rotation

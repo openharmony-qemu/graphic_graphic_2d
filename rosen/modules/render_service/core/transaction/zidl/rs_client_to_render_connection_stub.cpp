@@ -15,6 +15,9 @@
 
 #include "rs_client_to_render_connection_stub.h"
 #include <memory>
+#include <cstring>
+
+#include "ipc_skeleton.h"
 #include "ivsync_connection.h"
 #ifdef RES_SCHED_ENABLE
 #include "res_sched_client.h"
@@ -132,31 +135,6 @@ static constexpr std::array descriptorCheckList = {
     static_cast<uint32_t>(RSIClientToRenderConnectionInterfaceCode::REGISTER_CLIENT_PROCESS_BUFFER_RELEASE_LISTENER),
 };
 
-void CopyFileDescriptor(MessageParcel& old, MessageParcel& copied)
-{
-    binder_size_t* object = reinterpret_cast<binder_size_t*>(old.GetObjectOffsets());
-    binder_size_t* copiedObject = reinterpret_cast<binder_size_t*>(copied.GetObjectOffsets());
-
-    size_t objectNum = old.GetOffsetsSize();
-
-    uintptr_t data = old.GetData();
-    uintptr_t copiedData = copied.GetData();
-
-    for (size_t i = 0; i < objectNum; i++) {
-        const flat_binder_object* flat = reinterpret_cast<flat_binder_object*>(data + object[i]);
-        flat_binder_object* copiedFlat = reinterpret_cast<flat_binder_object*>(copiedData + copiedObject[i]);
-
-        if (flat->hdr.type == BINDER_TYPE_FD && flat->handle >= 0) {
-            int32_t val = dup(flat->handle);
-            if (val < 0) {
-                ROSEN_LOGW("CopyFileDescriptor dup failed, fd:%{public}d, handle:%{public}" PRIu32, val,
-                    static_cast<uint32_t>(flat->handle));
-            }
-            copiedFlat->handle = static_cast<uint32_t>(val);
-        }
-    }
-}
-
 std::shared_ptr<MessageParcel> CopyParcelIfNeed(MessageParcel& old, pid_t callingPid)
 {
     if (RSSystemProperties::GetCacheEnabledForRotation() &&
@@ -181,28 +159,9 @@ std::shared_ptr<MessageParcel> CopyParcelIfNeed(MessageParcel& old, pid_t callin
     }
 
     RS_TRACE_NAME("CopyParcelForUnmarsh: size:" + std::to_string(dataSize));
-    void* base = malloc(dataSize);
-    if (base == nullptr) {
-        RS_LOGE("RSClientToRenderConnectionStub::CopyParcelIfNeed malloc failed");
+    auto parcelCopied = RSAshmemHelper::CopyTransactionParcel(old);
+    if (parcelCopied == nullptr) {
         return nullptr;
-    }
-    if (memcpy_s(base, dataSize, reinterpret_cast<void*>(old.GetData()), dataSize) != 0) {
-        RS_LOGE("RSClientToRenderConnectionStub::CopyParcelIfNeed copy parcel data failed");
-        free(base);
-        return nullptr;
-    }
-
-    auto parcelCopied = RS_PROFILER_COPY_PARCEL(old);
-    if (!parcelCopied->ParseFrom(reinterpret_cast<uintptr_t>(base), dataSize)) {
-        RS_LOGE("RSClientToRenderConnectionStub::CopyParcelIfNeed ParseFrom failed");
-        free(base);
-        return nullptr;
-    }
-
-    auto objectNum = old.GetOffsetsSize();
-    if (objectNum != 0) {
-        parcelCopied->InjectOffsets(old.GetObjectOffsets(), objectNum);
-        CopyFileDescriptor(old, *parcelCopied);
     }
     auto token = parcelCopied->ReadInterfaceToken();
     if (token != RSIClientToRenderConnection::GetDescriptor()) {
@@ -212,12 +171,10 @@ std::shared_ptr<MessageParcel> CopyParcelIfNeed(MessageParcel& old, pid_t callin
     int32_t data{0};
     if (!parcelCopied->ReadInt32(data)) {
         RS_LOGE("RSClientToRenderConnectionStub::CopyParcelIfNeed parcel data Read failed");
-        free(base);
         return nullptr;
     }
     if (data != 0) {
         RS_LOGE("RSClientToRenderConnectionStub::CopyParcelIfNeed parcel data not match");
-        free(base);
         return nullptr;
     }
     return parcelCopied;
@@ -304,6 +261,18 @@ int RSClientToRenderConnectionStub::OnRemoteRequest(
     uint32_t parcelNumber = RS_PROFILER_ON_REMOTE_REQUEST(this, code, data, reply, option);
     AshmemFdContainer::SetIsUnmarshalThread(false);
     pid_t callingPid = GetCallingPid();
+    const bool isAsyncZeroPidCommit =
+        code == static_cast<uint32_t>(RSIClientToRenderConnectionInterfaceCode::COMMIT_TRANSACTION) &&
+        callingPid == 0 && (option.GetFlags() & MessageOption::TF_ASYNC) != 0;
+    if (isAsyncZeroPidCommit) {
+        // Linux keeps the asynchronous wire PID zero. Only the kernel sender
+        // info may supply the real identity; never trust a Parcel/command PID.
+        callingPid = IPCSkeleton::GetCallingRealPid();
+        if (callingPid <= 0) {
+            return ERR_INVALID_STATE;
+        }
+    }
+    const RSScopedAsyncCallerPid asyncCaller(isAsyncZeroPidCommit ? callingPid : 0);
     RSMarshallingHelper::SetCallingPid(callingPid);
     auto tid = gettid();
     {
@@ -381,7 +350,8 @@ int RSClientToRenderConnectionStub::OnRemoteRequest(
                                 "IsCallingPidValid check failed");
                         }
                     }
-                    CommitTransaction(transactionData);
+                    const RSScopedCommitPayloadSize payloadSize(data.GetDataSize());
+                    ret = CommitTransaction(transactionData);
                     break;
                 }
             } else {
@@ -416,7 +386,8 @@ int RSClientToRenderConnectionStub::OnRemoteRequest(
                         RS_LOGE("RSClientToRenderConnectionStub::COMMIT_TRANSACTION IsCallingPidValid check failed");
                     }
                 }
-                CommitTransaction(transactionData);
+                const RSScopedCommitPayloadSize payloadSize(parsedParcel->GetDataSize());
+                ret = CommitTransaction(transactionData);
             }
             break;
         }
@@ -582,6 +553,14 @@ int RSClientToRenderConnectionStub::OnRemoteRequest(
         // LCOV_EXCL_START
         case static_cast<uint32_t>(RSIClientToRenderConnectionInterfaceCode::REGISTER_APPLICATION_AGENT): {
             pid_t pid = GetCallingPid();
+            if (pid == 0 && (option.GetFlags() & MessageOption::TF_ASYNC) != 0) {
+                // One-way Binder wire PIDs stay zero; use only the kernel sender identity.
+                pid = IPCSkeleton::GetCallingRealPid();
+            }
+            if (pid <= 0) {
+                ret = ERR_INVALID_STATE;
+                break;
+            }
             RS_PROFILER_PATCH_PID(data, pid);
             auto remoteObject = data.ReadRemoteObject();
             if (remoteObject == nullptr) {
@@ -1896,6 +1875,13 @@ int RSClientToRenderConnectionStub::OnRemoteRequest(
             if (!data.ReadInt32(pid) || !data.ReadUint32(tid)) {
                 RS_LOGE("DelegateModeDebugTag: REGISTER_SURFACE_TRANSACTION_LISTENER: ReadUint64 fail, pid/tid");
                 return ERR_INVALID_REPLY;
+            }
+            // pid/tid are routing metadata, never authority to change the caller.
+            const pid_t listenerCaller = GetCallingPid();
+            if ((option.GetFlags() & MessageOption::TF_ASYNC) != 0 || listenerCaller <= 0 ||
+                pid != listenerCaller || tid == 0 || tid > INT32_MAX ||
+                (listenerId >> 48) != (static_cast<uint64_t>(listenerCaller) & 0xFFFF)) {
+                return ERR_INVALID_STATE;
             }
             sptr<RSISurfaceTransactionListener> listener = iface_cast<RSISurfaceTransactionListener>(listenerObject);
             if (listener == nullptr) {

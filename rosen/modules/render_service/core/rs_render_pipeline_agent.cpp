@@ -14,6 +14,10 @@
  */
 
 #include "rs_render_pipeline_agent.h"
+#include <atomic>
+#include <mutex>
+#include <unordered_map>
+#include "transaction/zidl/rs_client_to_render_connection_stub.h"
 #include "common/rs_background_thread.h"
 #include "command/rs_command_verify_helper.h"
 #include "command/rs_delegate_composite_command.h"
@@ -93,6 +97,142 @@ constexpr uint64_t MAX_TIME_OUT_NS = 1e9;
 constexpr int64_t MAX_FREEZE_SCREEN_TIME = 3000;
 const std::string UNFREEZE_SCREEN_TASK_NAME = "UNFREEZE_SCREEN_TASK";
 
+// Bound only the newly introduced main-thread commit queue. Byte accounting
+// measures receiver-observed serialized data, not every heap object in RS.
+constexpr size_t COMMIT_QUEUE_COUNT_LIMIT = 512;
+constexpr size_t COMMIT_PID_COUNT_LIMIT = 128;
+constexpr size_t COMMIT_QUEUE_BYTES_LIMIT = 256 * 1024 * 1024;
+constexpr size_t COMMIT_PID_BYTES_LIMIT = 64 * 1024 * 1024;
+constexpr size_t COMMIT_INTERNAL_SIZE_CHARGE = 4 * 1024 * 1024;
+
+class RSCommitQueueBudget final {
+public:
+    static std::shared_ptr<RSCommitQueueBudget> Instance()
+    {
+        static auto budget = std::make_shared<RSCommitQueueBudget>();
+        return budget;
+    }
+    bool Acquire(pid_t pid, size_t bytes)
+    {
+        if (pid <= 0 || bytes > COMMIT_PID_BYTES_LIMIT) {
+            return false;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (count_ >= COMMIT_QUEUE_COUNT_LIMIT || bytes > COMMIT_QUEUE_BYTES_LIMIT - bytes_) {
+            return false;
+        }
+        auto it = usage_.find(pid);
+        if (it != usage_.end() && (it->second.count >= COMMIT_PID_COUNT_LIMIT ||
+            bytes > COMMIT_PID_BYTES_LIMIT - it->second.bytes)) {
+            return false;
+        }
+        auto& usage = usage_[pid];
+        ++usage.count;
+        usage.bytes += bytes;
+        ++count_;
+        bytes_ += bytes;
+        return true;
+    }
+    void Release(pid_t pid, size_t bytes)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = usage_.find(pid);
+        if (it == usage_.end()) {
+            return;
+        }
+        --it->second.count;
+        it->second.bytes -= bytes;
+        --count_;
+        bytes_ -= bytes;
+        if (it->second.count == 0) {
+            usage_.erase(it);
+        }
+    }
+
+private:
+    struct Usage { size_t count = 0; size_t bytes = 0; };
+    std::mutex mutex_;
+    std::unordered_map<pid_t, Usage> usage_;
+    size_t count_ = 0;
+    size_t bytes_ = 0;
+};
+
+class RSCommitQueuePermit final {
+public:
+    static std::shared_ptr<RSCommitQueuePermit> Create(pid_t pid, size_t bytes)
+    {
+        // No decoded-transaction or public IPC class layout is changed.
+        bytes = bytes == 0 ? COMMIT_INTERNAL_SIZE_CHARGE : bytes;
+        auto budget = RSCommitQueueBudget::Instance();
+        auto permit = std::make_shared<RSCommitQueuePermit>(pid, bytes, budget);
+        if (!budget->Acquire(pid, bytes)) {
+            return nullptr;
+        }
+        permit->pending_.store(true);
+        return permit;
+    }
+    RSCommitQueuePermit(pid_t pid, size_t bytes, std::shared_ptr<RSCommitQueueBudget> budget)
+        : pid_(pid), bytes_(bytes), budget_(std::move(budget)) {}
+    ~RSCommitQueuePermit()
+    {
+        Complete();
+    }
+    void Complete()
+    {
+        if (pending_.exchange(false)) {
+            budget_->Release(pid_, bytes_);
+        }
+    }
+
+private:
+    const pid_t pid_;
+    const size_t bytes_;
+    // A queued permit retains the budget even during static shutdown.
+    const std::shared_ptr<RSCommitQueueBudget> budget_;
+    std::atomic<bool> pending_ { false };
+};
+
+class RSCommitQueueCompletion final {
+public:
+    explicit RSCommitQueueCompletion(std::shared_ptr<RSCommitQueuePermit> permit) : permit_(std::move(permit)) {}
+    ~RSCommitQueueCompletion()
+    {
+        permit_->Complete();
+    }
+
+private:
+    const std::shared_ptr<RSCommitQueuePermit> permit_;
+};
+
+bool PostBoundedCommit(RSMainThread* mainThread, const std::shared_ptr<RSRenderPipeline>& pipeline,
+    std::unique_ptr<RSTransactionData>& transactionData, const std::shared_ptr<RSCommitQueuePermit>& permit)
+{
+    auto task = [mainThread, pipeline, transaction = std::move(transactionData), permit]() mutable {
+        RSCommitQueueCompletion complete(permit);
+        // Do not leave an input alive in a producer-retained scheduled closure.
+        auto data = std::move(transaction);
+        // Retain the pipeline that owns this main-thread endpoint.
+        (void)pipeline;
+        if (mainThread == nullptr || data == nullptr) {
+            return;
+        }
+#ifndef ROSEN_CROSS_PLATFORM
+        RsDelegateCompositeCallbackManager::GetInstance().PrepareDelegateCompositeCommand(data);
+#endif
+        if (data->GetDVSyncUpdate()) {
+            mainThread->DVSyncUpdate(data->GetDVSyncTime(), data->GetTimestamp());
+        }
+        if (mainThread->IsNeedProcessBySingleFrameComposer(data)) {
+            mainThread->ProcessDataBySingleFrameComposer(data);
+        } else {
+            mainThread->RecvRSTransactionData(data);
+        }
+    };
+    auto [scheduledTask, taskFuture] = ST::ScheduledTask<decltype(task)>::Create(std::move(task));
+    (void)taskFuture;
+    return mainThread != nullptr && mainThread->TryPostTask([task = std::move(scheduledTask)]() { task->Run(); });
+}
+
 }
 
 void RSRenderPipelineAgent::ConfigureForceTunnelLayer(
@@ -158,30 +298,23 @@ ErrCode RSRenderPipelineAgent::CommitTransaction(pid_t callingPid, bool isTokenT
     bool isNonSystemAppCalling, std::unique_ptr<RSTransactionData>& transactionData)
 {
     auto pipeline = rsRenderPipeline_.lock();
-    if (!pipeline) {
+    if (!pipeline || !transactionData || !isTokenTypeValid) {
         RS_LOGW("RSRenderPipelineAgent::%{public}s, pipeline is nullptr", __func__);
         return ERR_INVALID_VALUE;
     }
-#ifndef ROSEN_CROSS_PLATFORM
-    RsDelegateCompositeCallbackManager::GetInstance().PrepareDelegateCompositeCommand(transactionData);
-#endif
-
     bool shouldDrop = RSUnmarshalThread::Instance().ReportTransactionDataStatistics(
         callingPid, transactionData.get(), isNonSystemAppCalling);
     if (shouldDrop) {
         RS_LOGW("CommitTransaction data droped");
         return ERR_INVALID_VALUE;
     }
-    if (transactionData && transactionData->GetDVSyncUpdate()) {
-        pipeline->GetMainThread()->DVSyncUpdate(
-            transactionData->GetDVSyncTime(), transactionData->GetTimestamp());
+    auto permit = RSCommitQueuePermit::Create(callingPid, RSScopedCommitPayloadSize::Get());
+    if (!permit) {
+        RS_LOGW("CommitTransaction main-thread queue quota exceeded");
+        return ERR_INVALID_STATE;
     }
-    bool isProcessBySingleFrame =
-        pipeline->GetMainThread()->IsNeedProcessBySingleFrameComposer(transactionData);
-    if (isProcessBySingleFrame) {
-        pipeline->GetMainThread()->ProcessDataBySingleFrameComposer(transactionData);
-    } else {
-        pipeline->GetMainThread()->RecvRSTransactionData(transactionData);
+    if (!PostBoundedCommit(pipeline->GetMainThread(), pipeline, transactionData, permit)) {
+        return ERR_INVALID_STATE;
     }
     return ERR_OK;
 }
@@ -721,7 +854,7 @@ ErrCode RSRenderPipelineAgent::FreezeScreen(NodeId id, bool isFreeze, bool needS
         auto displayNode = RSBaseRenderNode::ReinterpretCast<RSLogicalDisplayRenderNode>(
             renderPipeline->GetMainThread()->GetContext().GetNodeMap().GetRenderNode(id));
         auto screenNode = displayNode == nullptr ? nullptr :
-            std::static_pointer_cast<RSScreenRenderNode>(displayNode->GetParent().lock());
+            RSBaseRenderNode::ReinterpretCast<RSScreenRenderNode>(displayNode->GetParent().lock());
         if (!screenNode) {
             RS_LOGE("%{public}s failed, screenNode is nullptr", __func__);
             return;

@@ -48,6 +48,7 @@ private:
 };
 
 class AshmemFdWorker;
+class AshmemFdContainerScope;
 class RSB_EXPORT AshmemFdContainer {
 public:
     static AshmemFdContainer& Instance();
@@ -67,6 +68,7 @@ private:
     bool isUseFdContainer_ = false;
 
     friend class AshmemFdWorker;
+    friend class AshmemFdContainerScope;
 };
 
 class RSB_EXPORT AshmemFdWorker {
@@ -89,8 +91,23 @@ private:
     bool needManualCloseFds_ = false;
 };
 
+// This scope is constructed and destroyed only by the executing task.
+class RSB_EXPORT AshmemFdContainerScope final {
+public:
+    explicit AshmemFdContainerScope(AshmemFdWorker* worker);
+    ~AshmemFdContainerScope();
+
+private:
+    DISALLOW_COPY_AND_MOVE(AshmemFdContainerScope);
+    AshmemFdContainer& container_;
+    std::unordered_map<binder_size_t, int> previousFds_;
+    const bool previousUse_;
+    const bool previousUnmarshal_;
+};
+
 class RSB_EXPORT RSAshmemHelper {
 public:
+    static std::shared_ptr<MessageParcel> CopyTransactionParcel(MessageParcel& source);
     static std::shared_ptr<MessageParcel> CreateAshmemParcel(std::shared_ptr<MessageParcel>& dataParcel);
     static std::shared_ptr<MessageParcel> ParseFromAshmemParcel(MessageParcel* ashmemParcel,
         std::unique_ptr<AshmemFdWorker>& ashmemFdWorker,

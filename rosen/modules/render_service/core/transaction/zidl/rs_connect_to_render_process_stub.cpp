@@ -67,6 +67,12 @@ int RSConnectToRenderProcessStub::OnRemoteRequest(
                 break;
             }
 
+            if (!reply.WriteBool(true)) {
+                ret = ERR_INVALID_STATE;
+                RS_LOGE("RSConnectToRenderProcessStub::CREATE_CONNECTION WriteBool replyBool failed");
+                break;
+            }
+
             auto replyObj = newRenderConn->AsObject();
             if (replyObj == nullptr || !reply.WriteRemoteObject(replyObj)) {
                 ret = ERR_UNKNOWN_OBJECT;

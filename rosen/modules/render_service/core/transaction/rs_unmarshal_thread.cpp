@@ -48,6 +48,42 @@ constexpr size_t TRANSACTION_DATA_KILL_COUNT = 20000;
 constexpr int MAX_CONCURRENCY = 3;
 const char* TRANSACTION_REPORT_NAME = "IPC_DATA_OVER_ERROR";
 
+class NoWaitTaskPermit final {
+public:
+    explicit NoWaitTaskPermit(std::atomic<int>& count) : count_(count)
+    {
+        count_.fetch_add(1);
+    }
+    ~NoWaitTaskPermit()
+    {
+        Complete();
+    }
+    void Complete()
+    {
+        if (pending_.exchange(false)) {
+            count_.fetch_sub(1);
+        }
+    }
+
+private:
+    std::atomic<int>& count_;
+    std::atomic<bool> pending_ { true };
+};
+
+class NoWaitTaskCompletion final {
+public:
+    explicit NoWaitTaskCompletion(std::shared_ptr<NoWaitTaskPermit> permit) : permit_(std::move(permit)) {}
+    ~NoWaitTaskCompletion()
+    {
+        if (permit_) {
+            permit_->Complete();
+        }
+    }
+
+private:
+    const std::shared_ptr<NoWaitTaskPermit> permit_;
+};
+
 const std::shared_ptr<AppExecFwk::AppMgrClient> GetAppMgrClient()
 {
     static std::shared_ptr<AppExecFwk::AppMgrClient> appMgrClient =
@@ -134,13 +170,14 @@ void RSUnmarshalThread::RecvParcel(std::shared_ptr<MessageParcel>& parcel, bool 
     bool isPendingUnmarshal = (parcel->GetDataSize() > MIN_PENDING_REQUEST_SYNC_DATA_SIZE);
     bool unmarshalParallel = RSSystemProperties::GetUnmarshalParallelEnabled() &&
                              parcel->GetDataSize() > RSSystemProperties::GetUnmarshalParallelMinDataSize();
+    // Register before publication; each non-wait task owns exactly one permit.
+    auto noWaitPermit = waitUnmarshalling ? nullptr : std::make_shared<NoWaitTaskPermit>(noNeedWaitTaskNum_);
     RSTaskMessage::RSTask task = [this, parcel = parcel, isPendingUnmarshal, isNonSystemAppCalling, callingPid,
-        ashmemFdWorker = std::shared_ptr(std::move(ashmemFdWorker)), ashmemFlowControlUnit, parcelNumber]() {
+        ashmemFdWorker = std::shared_ptr(std::move(ashmemFdWorker)), ashmemFlowControlUnit, parcelNumber,
+        noWaitPermit]() {
+        NoWaitTaskCompletion complete(noWaitPermit);
         RSMarshallingHelper::SetCallingPid(callingPid);
-        AshmemFdContainer::SetIsUnmarshalThread(true);
-        if (ashmemFdWorker) {
-            ashmemFdWorker->PushFdsToContainer();
-        }
+        AshmemFdContainerScope fdScope(ashmemFdWorker.get());
         static thread_local int unmarshalTid = gettid();
         RsFrameReport::ReportUnmarshalData(unmarshalTid, parcel->GetDataSize());
         auto transData = RSBaseRenderUtil::ParseTransactionData(*parcel, parcelNumber);
@@ -183,9 +220,6 @@ void RSUnmarshalThread::RecvParcel(std::shared_ptr<MessageParcel>& parcel, bool 
                 RSMainThread::Instance()->RequestNextVSync("UI", time);
             }
         }
-        if (noNeedWaitTaskNum_ > 0) {
-            noNeedWaitTaskNum_--;
-        }
         RSMainThread::Instance()->NotifyUnmarshalTask(time);
         // ashmem parcel flow control ends in the destructor of ashmemFlowControlUnit
     };
@@ -199,9 +233,6 @@ void RSUnmarshalThread::RecvParcel(std::shared_ptr<MessageParcel>& parcel, bool 
     }
     if (!isPendingUnmarshal) {
         RSMainThread::Instance()->RequestNextVSync();
-    }
-    if (!waitUnmarshalling) {
-        noNeedWaitTaskNum_++;
     }
 }
 

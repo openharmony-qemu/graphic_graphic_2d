@@ -448,7 +448,7 @@ void RsDelegateCompositeCallbackManager::ProcessEachCommandQueue(std::queue<std:
     while (!cmdqueue.empty()) {
         std::unique_ptr<RSCommand> cmd = std::move(cmdqueue.front());
         cmdqueue.pop();
-        if (cmd) {
+        if (cmd && cmd->IsCallingPidValid()) {
             cmd->Process(context);
         }
     }
@@ -467,10 +467,11 @@ void RsDelegateCompositeCallbackManager::PrepareDelegateCompositeCommand(
     std::queue<std::unique_ptr<RSCommand>> cmdQueue;
     for (auto it = processPayload.begin(); it != processPayload.end();) {
         auto& command = std::get<2>(*it);
-        if (!command) {
+        // A delegate listener is not a privilege or node-ownership grant.
+        if (!command || !command->IsCallingPidValid()) {
+            ++it;
             continue;
         }
-        command->SetCallingPidValid(true);
         cmdQueue.push(std::move(command));
         it = processPayload.erase(it);
         if (cmdQueue.size() >= MAX_MAP_SIZE) {

@@ -229,31 +229,6 @@ static constexpr std::array descriptorCheckList = {
     static_cast<uint32_t>(RSIClientToServiceConnectionInterfaceCode::SET_UIFIRST_SCALE),
 };
 
-void CopyFileDescriptor(MessageParcel& old, MessageParcel& copied)
-{
-    binder_size_t* object = reinterpret_cast<binder_size_t*>(old.GetObjectOffsets());
-    binder_size_t* copiedObject = reinterpret_cast<binder_size_t*>(copied.GetObjectOffsets());
-
-    size_t objectNum = old.GetOffsetsSize();
-
-    uintptr_t data = old.GetData();
-    uintptr_t copiedData = copied.GetData();
-
-    for (size_t i = 0; i < objectNum; i++) {
-        const flat_binder_object* flat = reinterpret_cast<flat_binder_object*>(data + object[i]);
-        flat_binder_object* copiedFlat = reinterpret_cast<flat_binder_object*>(copiedData + copiedObject[i]);
-
-        if (flat->hdr.type == BINDER_TYPE_FD && flat->handle >= 0) {
-            int32_t val = dup(flat->handle);
-            if (val < 0) {
-                ROSEN_LOGW("CopyFileDescriptor dup failed, fd:%{public}d, handle:%{public}" PRIu32, val,
-                    static_cast<uint32_t>(flat->handle));
-            }
-            copiedFlat->handle = static_cast<uint32_t>(val);
-        }
-    }
-}
-
 std::shared_ptr<MessageParcel> CopyParcelIfNeed(MessageParcel& old, pid_t callingPid)
 {
     if (RSSystemProperties::GetCacheEnabledForRotation() &&
@@ -278,38 +253,17 @@ std::shared_ptr<MessageParcel> CopyParcelIfNeed(MessageParcel& old, pid_t callin
     }
 
     RS_TRACE_NAME("CopyParcelForUnmarsh: size:" + std::to_string(dataSize));
-    void* base = malloc(dataSize);
-    if (base == nullptr) {
-        RS_LOGE("RSClientToServiceConnectionStub::CopyParcelIfNeed malloc failed");
+    auto parcelCopied = RSAshmemHelper::CopyTransactionParcel(old);
+    if (parcelCopied == nullptr) {
         return nullptr;
-    }
-    if (memcpy_s(base, dataSize, reinterpret_cast<void*>(old.GetData()), dataSize) != 0) {
-        RS_LOGE("RSClientToServiceConnectionStub::CopyParcelIfNeed copy parcel data failed");
-        free(base);
-        return nullptr;
-    }
-
-    auto parcelCopied = RS_PROFILER_COPY_PARCEL(old);
-    if (!parcelCopied->ParseFrom(reinterpret_cast<uintptr_t>(base), dataSize)) {
-        RS_LOGE("RSClientToServiceConnectionStub::CopyParcelIfNeed ParseFrom failed");
-        free(base);
-        return nullptr;
-    }
-
-    auto objectNum = old.GetOffsetsSize();
-    if (objectNum != 0) {
-        parcelCopied->InjectOffsets(old.GetObjectOffsets(), objectNum);
-        CopyFileDescriptor(old, *parcelCopied);
     }
     int32_t data{0};
     if (!parcelCopied->ReadInt32(data)) {
         RS_LOGE("RSClientToServiceConnectionStub::CopyParcelIfNeed parcel data Read failed");
-        free(base);
         return nullptr;
     }
     if (data != 0) {
         RS_LOGE("RSClientToServiceConnectionStub::CopyParcelIfNeed parcel data not match");
-        free(base);
         return nullptr;
     }
     return parcelCopied;

@@ -205,7 +205,7 @@ void RSTransactionData::ProcessBySingleFrameComposer(RSContext& context)
 {
     std::unique_lock<std::mutex> lock(commandMutex_);
     for (auto& [nodeId, followType, command] : payload_) {
-        if (command != nullptr &&
+        if (command != nullptr && command->IsCallingPidValid() &&
             command->GetType() == RSCommandType::CANVAS_NODE &&
             command->GetSubType() == RSCanvasNodeCommandType::CANVAS_NODE_UPDATE_RECORDING) {
             command->Process(context);
@@ -387,7 +387,8 @@ bool RSTransactionData::UnmarshallingCommand(Parcel& parcel)
                 ROSEN_LOGE("RSTransactionData::UnmarshallingCommand cannot read nodeId");
                 return false;
             }
-            if (!parcel.ReadUint8(followType)) {
+            if (!parcel.ReadUint8(followType) ||
+                followType > static_cast<uint8_t>(FollowType::FOLLOW_TO_SELF)) {
                 ROSEN_LOGE("RSTransactionData::UnmarshallingCommand cannot read followType");
                 return false;
             }
@@ -437,6 +438,10 @@ bool RSTransactionData::UnmarshallingCommand(Parcel& parcel)
         parcel.ReadUint64(index_) && parcel.ReadUint64(syncId_) && parcel.ReadInt32(parentPid_) &&
         parcel.ReadBool(dvsyncTimeUpdate_) && parcel.ReadUint64(dvsyncTime_) &&
         parcel.ReadUint8(scene);
+    if (!flag || (scene != static_cast<uint8_t>(RSTransactionDataScenes::Default) &&
+        scene != static_cast<uint8_t>(RSTransactionDataScenes::Rebuild))) {
+        return false;
+    }
     scene_ = static_cast<RSTransactionDataScenes>(scene);
 #ifndef ROSEN_CROSS_PLATFORM
     flag = flag && parcel.ReadInt32(tid);

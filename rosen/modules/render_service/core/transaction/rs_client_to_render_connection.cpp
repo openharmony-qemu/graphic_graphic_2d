@@ -278,6 +278,9 @@ ErrCode RSClientToRenderConnection::CommitTransaction(std::unique_ptr<RSTransact
         return ERR_INVALID_VALUE;
     }
     pid_t callingPid = GetCallingPid();
+    if (callingPid == 0 && RSScopedAsyncCallerPid::Get() > 0) {
+        callingPid = RSScopedAsyncCallerPid::Get();
+    }
     bool isTokenTypeValid = true;
     bool isNonSystemAppCalling = false;
     RSInterfaceCodeAccessVerifierBase::GetAccessType(isTokenTypeValid, isNonSystemAppCalling);

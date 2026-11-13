@@ -12,14 +12,59 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+#include <dlfcn.h>
+#include <string>
+
 #include "hook.h"
 #include "thread_private_data_ctl.h"
 #include "wrapper_log.h"
 
+using GetGlHookTableFunc = OHOS::GlHookTable* (*)();
+using GetGlHookTableKeyFunc = pthread_key_t(*)();
+template<typename Func = void*>
+Func GetEglApi(const char* procname)
+{
+    constexpr const char *libWrapperName = "libEGL.so";
+    void* dlEglHandle = dlopen(libWrapperName, RTLD_NOW | RTLD_GLOBAL);
+    if (!dlEglHandle) {
+        WLOGE("Failed to load EGL library (%s) using dlopen", libWrapperName);
+        return nullptr;
+    }
+
+    void* func = dlsym(dlEglHandle, procname);
+    if (func) {
+        return reinterpret_cast<Func>(func);
+    };
+    dlclose(dlEglHandle);
+    return nullptr;
+}
+static GetGlHookTableFunc g_pfnGetGlHookTable = GetEglApi<GetGlHookTableFunc>("GetHookTable");
+static GetGlHookTableKeyFunc g_pfnGetGlHookTableKey = GetEglApi<GetGlHookTableKeyFunc>("GetHookTableKey");
+
+static pthread_key_t g_glHookTableKey = -1;
+
+__attribute__((__always_inline__))__inline__ static OHOS::GlHookTable *GetHookTable()
+{
+    if (__builtin_expect(g_glHookTableKey != static_cast<pthread_key_t>(-1), 1)) {
+        OHOS::GlHookTable *table = static_cast<OHOS::GlHookTable *>(pthread_getspecific(g_glHookTableKey));
+        if (__builtin_expect(table != nullptr, 1)) {
+            return table;
+        }
+    }
+
+    if (g_pfnGetGlHookTable == nullptr || g_pfnGetGlHookTableKey == nullptr) {
+        return nullptr;
+    }
+    OHOS::GlHookTable *table = g_pfnGetGlHookTable();
+    g_glHookTableKey = g_pfnGetGlHookTableKey();
+    return table;
+}
+
 #undef CALL_HOOK_API
 #define CALL_HOOK_API(api, ...)                                                         \
     do {                                                                                \
-        OHOS::GlHookTable const *table = OHOS::ThreadPrivateDataCtl::GetGlHookTable();  \
+        OHOS::GlHookTable *table = GetHookTable();                               \
         if (table && table->table1.api) {                                               \
             table->table1.api(__VA_ARGS__);                                             \
         } else {                                                                        \
@@ -30,7 +75,7 @@
 
 #undef CALL_HOOK_API_RET
 #define CALL_HOOK_API_RET(api, ...) do {                                                \
-        OHOS::GlHookTable const *table = OHOS::ThreadPrivateDataCtl::GetGlHookTable();  \
+        OHOS::GlHookTable *table = GetHookTable();                               \
         if (table && table->table1.api) {                                               \
             return table->table1.api(__VA_ARGS__);                                      \
         } else {                                                                        \
@@ -39,7 +84,6 @@
         }                                                                               \
     } while (0);                                                                        \
 }
-
 #undef HOOK_API_ENTRY
 #define HOOK_API_ENTRY(r, api, ...) r api(__VA_ARGS__) {                                \
 

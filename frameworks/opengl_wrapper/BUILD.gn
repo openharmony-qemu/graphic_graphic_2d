@@ -145,10 +145,7 @@ config("glesv1_public_config") {
 
 ohos_shared_library("GLESv1") {
   branch_protector_ret = "pac_ret"
-  sources = [
-    "src/GLES1/gles1.cpp",
-    "src/thread_private_data_ctl.cpp",
-  ]
+  sources = [ "src/GLES1/gles1.cpp" ]
   configs = [ ":glesv1_config" ]
 
   public_configs = [ ":glesv1_public_config" ]
@@ -189,10 +186,7 @@ config("glesv2_public_config") {
 
 ohos_shared_library("GLESv2") {
   branch_protector_ret = "pac_ret"
-  sources = [
-    "src/GLES2/gles2.cpp",
-    "src/thread_private_data_ctl.cpp",
-  ]
+  sources = [ "src/GLES2/gles2.cpp" ]
   configs = [ ":glesv2_config" ]
 
   public_configs = [ ":glesv2_public_config" ]

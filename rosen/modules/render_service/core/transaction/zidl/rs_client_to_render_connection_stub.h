@@ -16,6 +16,7 @@
 #ifndef ROSEN_RENDER_SERVICE_BASE_TRANSACTION_RS_CLIENT_TO_RENDER_CONNECTION_STUB_H
 #define ROSEN_RENDER_SERVICE_BASE_TRANSACTION_RS_CLIENT_TO_RENDER_CONNECTION_STUB_H
 
+#include <cstddef>
 #include <unordered_set>
 #include <iremote_stub.h>
 #include <message_option.h>
@@ -28,6 +29,64 @@
 
 namespace OHOS {
 namespace Rosen {
+// Internal request-scoped identity; not a Parcel field or public IPC API.
+class RSScopedAsyncCallerPid final {
+public:
+    explicit RSScopedAsyncCallerPid(pid_t callingPid) : previous_(Current())
+    {
+        Current() = callingPid;
+    }
+
+    ~RSScopedAsyncCallerPid()
+    {
+        Current() = previous_;
+    }
+
+    RSScopedAsyncCallerPid(const RSScopedAsyncCallerPid&) = delete;
+    RSScopedAsyncCallerPid& operator=(const RSScopedAsyncCallerPid&) = delete;
+
+    static pid_t Get()
+    {
+        return Current();
+    }
+
+private:
+    static pid_t& Current()
+    {
+        static thread_local pid_t callingPid = 0;
+        return callingPid;
+    }
+
+    const pid_t previous_;
+};
+
+// Receiver-observed size, not an application-supplied accounting field.
+class RSScopedCommitPayloadSize final {
+public:
+    explicit RSScopedCommitPayloadSize(size_t bytes) : previous_(Current())
+    {
+        Current() = bytes;
+    }
+    ~RSScopedCommitPayloadSize()
+    {
+        Current() = previous_;
+    }
+    RSScopedCommitPayloadSize(const RSScopedCommitPayloadSize&) = delete;
+    RSScopedCommitPayloadSize& operator=(const RSScopedCommitPayloadSize&) = delete;
+    static size_t Get()
+    {
+        return Current();
+    }
+
+private:
+    static size_t& Current()
+    {
+        static thread_local size_t bytes = 0;
+        return bytes;
+    }
+    const size_t previous_;
+};
+
 class RSClientToRenderConnectionStub : public IRemoteStub<RSIClientToRenderConnection> {
 public:
     RSClientToRenderConnectionStub() = default;

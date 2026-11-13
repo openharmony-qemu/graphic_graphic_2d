@@ -128,6 +128,7 @@ public:
     void RequestNextVSync(
         const std::string& fromWhom = "unknown", int64_t lastVSyncTS = 0, const int64_t& requestVsyncTime = 0);
     void PostTask(RSTaskMessage::RSTask task);
+    bool TryPostTask(RSTaskMessage::RSTask task);
     void PostTask(RSTaskMessage::RSTask task, const std::string& name, int64_t delayTime,
         AppExecFwk::EventQueue::Priority priority = AppExecFwk::EventQueue::Priority::IDLE);
     void RemoveTask(const std::string& name);

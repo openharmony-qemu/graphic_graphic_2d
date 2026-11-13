@@ -37,10 +37,12 @@
 #define RSPARCELVER_ADD_NONEED 2
 
 namespace OHOS {
+class IRemoteObject;
 namespace Media {
 class PixelMap;
 }
 namespace Rosen {
+class RSIBufferAvailableCallback;
 class RSExtendImageObject;
 class RSExtendImageBaseObj;
 class RSExtendImageNineObject;
@@ -124,8 +126,20 @@ public:
     template<typename T>
     struct is_shared_ptr<std::shared_ptr<T>> : std::true_type {};
 
+#ifdef ROSEN_OHOS
     template<typename T>
-    using is_not_pointer_or_shared_ptr = std::enable_if_t<!std::is_pointer<T>::value && !is_shared_ptr<T>::value, bool>;
+    struct is_sptr : std::false_type {};
+
+    template<typename T>
+    struct is_sptr<sptr<T>> : std::true_type {};
+#else
+    template<typename T>
+    struct is_sptr : std::false_type {};
+#endif
+
+    template<typename T>
+    using is_not_pointer_or_shared_ptr = std::enable_if_t<!std::is_pointer<T>::value &&
+        !is_shared_ptr<T>::value && !is_sptr<T>::value, bool>;
 
     template<typename T, typename = is_not_pointer_or_shared_ptr<T>>
     static bool Marshalling(Parcel& parcel, const T& val)
@@ -535,6 +549,14 @@ public:
     static bool Marshalling(Parcel& parcel, std::shared_ptr<Drawing::Data> val);
     static bool Unmarshalling(Parcel& parcel, std::shared_ptr<Drawing::Data>& val);
     static bool UnmarshallingWithCopy(Parcel& parcel, std::shared_ptr<Drawing::Data>& val);
+
+#ifdef ROSEN_OHOS
+    // These command arguments are IPC objects, never process-local POD.
+    static bool Marshalling(Parcel& parcel, const sptr<IRemoteObject>& object);
+    static bool Unmarshalling(Parcel& parcel, sptr<IRemoteObject>& object);
+    static bool Marshalling(Parcel& parcel, const sptr<RSIBufferAvailableCallback>& callback);
+    static bool Unmarshalling(Parcel& parcel, sptr<RSIBufferAvailableCallback>& callback);
+#endif
 
     static bool Marshalling(Parcel& parcel, sptr<Surface> surface);
     static bool Unmarshalling(Parcel& parcel, sptr<Surface>& surface);

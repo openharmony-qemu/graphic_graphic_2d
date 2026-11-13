@@ -4395,6 +4395,11 @@ void RSMainThread::ClassifyRSTransactionData(std::shared_ptr<RSTransactionData> 
     }
 }
 
+bool RSMainThread::TryPostTask(RSTaskMessage::RSTask task)
+{
+    return handler_ && handler_->PostTask(std::move(task), AppExecFwk::EventQueue::Priority::IMMEDIATE);
+}
+
 void RSMainThread::PostTask(RSTaskMessage::RSTask task)
 {
     if (handler_) {

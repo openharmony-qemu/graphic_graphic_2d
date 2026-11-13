@@ -34,6 +34,7 @@
 #include "pipeline/rs_render_node_map.h"
 #include "pipeline/rs_surface_render_node.h"
 #include "platform/common/rs_log.h"
+#include "platform/common/rs_system_properties.h"
 #include "render/rs_high_performance_visual_engine.h"
 
 #if defined(ROSEN_OHOS) && defined(RS_ENABLE_VK)
@@ -346,6 +347,19 @@ bool ExtractSnapshotAndScheduleColorPick(RSPaintFilterCanvas& canvas,
         RS_LOGE("ExtractSnapshotAndScheduleColorPick: gpuContext is null");
         return false;
     }
+#ifdef RS_ENABLE_GL
+    if (!RSSystemProperties::IsUseVulkan()) {
+        // Read the actual snapshot on its owning GL render context. The Vulkan
+        // semaphore path cannot schedule a GL image on ColorPickerThread.
+        Drawing::ColorQuad colorPicked;
+        if (!RSPropertyDrawableUtils::PickColor(gpuCtx, snapshot, colorPicked)) {
+            RS_LOGE("ExtractSnapshotAndScheduleColorPick: GL PickColor failed");
+            return false;
+        }
+        manager->HandleColorUpdate(colorPicked);
+        return true;
+    }
+#endif
     auto weakManager = std::weak_ptr<IColorPickerManager>(manager);
     auto colorPickerInfo = CreateColorPickerInfo(drawingSurface, snapshot, weakManager);
     ScheduleColorPickWithSemaphore(*drawingSurface, weakManager, std::move(colorPickerInfo), *gpuCtx);

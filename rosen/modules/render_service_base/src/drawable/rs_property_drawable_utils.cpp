@@ -281,8 +281,9 @@ std::shared_ptr<Drawing::Image> RSPropertyDrawableUtils::GpuScaleImage(
         return nullptr;
     }
 
-    static auto effectBuilder =
-        std::make_shared<Drawing::RuntimeShaderBuilder>(Drawing::RuntimeEffect::CreateForShader(PASS_THROUGH_PROG));
+    static const auto effect = Drawing::RuntimeEffect::CreateForShader(PASS_THROUGH_PROG);
+    // Builders mutate shader bindings; render threads must not share one.
+    auto effectBuilder = std::make_shared<Drawing::RuntimeShaderBuilder>(effect);
     if (!effectBuilder) {
         ROSEN_LOGE("RSPropertyDrawableUtils::GpuScaleImage effect is null");
         return nullptr;

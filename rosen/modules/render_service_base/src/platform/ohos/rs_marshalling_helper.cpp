@@ -23,6 +23,7 @@
 #include <unistd.h>
 
 #include "feature/capture/rs_ui_capture.h"
+#include "ipc_callbacks/buffer_available_callback.h"
 #include "image_type.h"
 #include "pixel_map.h"
 #include "recording/record_cmd.h"
@@ -3733,6 +3734,49 @@ bool RSMarshallingHelper::Unmarshalling(Parcel& parcel, RSSurfaceRenderNodeConfi
     success &= Unmarshalling(parcel, val.surfaceWindowType);
     success &= Unmarshalling(parcel, val.bundleName);
     return success;
+}
+
+bool RSMarshallingHelper::Marshalling(Parcel& parcel, const sptr<IRemoteObject>& object)
+{
+    return parcel.WriteBool(object != nullptr) &&
+        (object == nullptr || static_cast<MessageParcel&>(parcel).WriteRemoteObject(object));
+}
+
+bool RSMarshallingHelper::Unmarshalling(Parcel& parcel, sptr<IRemoteObject>& object)
+{
+    object = nullptr;
+    bool present = false;
+    if (!parcel.ReadBool(present)) {
+        return false;
+    }
+    if (!present) {
+        return true;
+    }
+    object = static_cast<MessageParcel&>(parcel).ReadRemoteObject();
+    return object != nullptr;
+}
+
+bool RSMarshallingHelper::Marshalling(Parcel& parcel, const sptr<RSIBufferAvailableCallback>& callback)
+{
+    const sptr<IRemoteObject> object = callback == nullptr ? nullptr : callback->AsObject();
+    if (callback != nullptr && object == nullptr) {
+        return false;
+    }
+    return Marshalling(parcel, object);
+}
+
+bool RSMarshallingHelper::Unmarshalling(Parcel& parcel, sptr<RSIBufferAvailableCallback>& callback)
+{
+    callback = nullptr;
+    sptr<IRemoteObject> object;
+    if (!Unmarshalling(parcel, object)) {
+        return false;
+    }
+    if (object == nullptr) {
+        return true;
+    }
+    callback = iface_cast<RSIBufferAvailableCallback>(object);
+    return callback != nullptr;
 }
 
 bool RSMarshallingHelper::Marshalling(Parcel& parcel, sptr<Surface> surface)
